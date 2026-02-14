@@ -8,6 +8,9 @@ from openai import OpenAI
 import json
 import mysql.connector
 from pydantic import BaseModel, Field
+from typing import Optional, Any, Dict
+import mysql.connector
+from mysql.connector import Error
 from typing import List, Union
 import re
 
@@ -21,11 +24,51 @@ client = weaviate.connect_to_weaviate_cloud(
     auth_credentials=Auth.api_key(weaviate_api_key),
 )
 
+mysql_log=os.getenv("MYSQL_LOG")
+mysql_pass=os.getenv("MYSQL_PASS")
+mysql_db=os.getenv("MYSQL_DB")
+
+DB_CONFIG = {
+    "host": "localhost",
+    "user": mysql_log,
+    "password": mysql_pass,
+    "database": mysql_db
+}
+
 print(client.is_ready())
 
 
 API_POLZA_AI = os.getenv("API_POLZA_AI")
 
+def db_select_last_prompt() -> Optional[tuple[int, Optional[str]]]:
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, system_prompt
+            FROM `prompt`
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        )
+        return cursor.fetchone()
+    except Error:
+        raise Exception("DB error")
+
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
 
 def books_vector_search(vec_query: str, database_name: str = "SaunaBooksInfo"):
     search_limit = 7
@@ -74,8 +117,8 @@ polza = OpenAI(
     api_key=API_POLZA_AI,
 )
 
-with open("system_prompt.txt", "r", encoding="utf-8") as f:
-    SYSTEM_PROMPT = f.read()
+# with open("system_prompt.txt", "r", encoding="utf-8") as f:
+#     SYSTEM_PROMPT = f.read()
 
 LOCAL_TOOLS = {
     "BooksVectorSearch": BooksVectorSearch
@@ -86,7 +129,10 @@ polza = OpenAI(
     api_key=API_POLZA_AI,
 )
 
+
 def run_with_tools_polza(prompt: str) -> str:
+    id, sys_prompt = db_select_last_prompt()
+    SYSTEM_PROMPT = str(sys_prompt)
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": prompt},
@@ -144,6 +190,20 @@ def run_with_tools_polza(prompt: str) -> str:
                     "remains_rounds": rounds_left,
                 }
 
+                messages.append({
+                    "role": "tool",
+                    "name": name,
+                    "tool_call_id": tc.id,
+                    "content": json.dumps(wrapped_content, ensure_ascii=False),
+                })
+
+            continue
+
+        # Если tool_calls нет — это финальный ответ модели
+        return msg.content
+
+    return "Ошибка: слишком много раундов tool-calls"
+root@msk-1-vm-4ax0:/opt/optimizer#
                 messages.append({
                     "role": "tool",
                     "name": name,

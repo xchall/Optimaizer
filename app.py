@@ -43,7 +43,8 @@ DB_CONFIG = {
 
 app = FastAPI()
 
-
+class PromptIn(BaseModel):
+    system_prompt: str
 
 def transcribe(external_audio_path: str) -> str:
     data = {
@@ -172,6 +173,33 @@ def db_select_last_result_by_deal_id(cursor, deal_id: int) -> Optional[tuple[int
         (deal_id,),
     )
     return cursor.fetchone()
+
+def db_select_last_prompt(cursor) -> Optional[tuple[int, Optional[str]]]:
+    """
+    Возвращает последнюю добавленную запись из prompt: (id, system_prompt) или None.
+    """
+    cursor.execute(
+        """
+        SELECT id, system_prompt
+        FROM `prompt`
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+    return cursor.fetchone()
+
+def db_insert_prompt(cursor, system_prompt: str) -> int:
+    """
+    Вставляет system_prompt в prompt и возвращает id новой записи.
+    """
+    cursor.execute(
+        """
+        INSERT INTO `prompt` (system_prompt)
+        VALUES (%s)
+        """,
+        (system_prompt,),
+    )
+    return int(cursor.lastrowid)
 
 def notes_to_string(notes: list[tuple[Any, ...]]) -> str:
     out_str = ""
@@ -327,7 +355,7 @@ async def generate_tasks_scores(
         if last_note_time == 0:
             return {"status": "empty_notes"}
         if previous_last_note_time == 0:# не было предыдущего контекста, и соответственно предыдущего результатат llm
-            res = db_select_context_lt(cursor,common_deal_id, last_note_time+60) # из-за строгого сравнения, чтобы не потерять +60 сек
+            res = db_select_context_lt(cursor,common_deal_id, last_note_time+1) # из-за строгого сравнения, чтобы не потерять +60 сек
             deal_context = notes_to_string(res)
 
             #не ищем предыдущий ответ, его не было
@@ -335,7 +363,7 @@ async def generate_tasks_scores(
             llm_answer = run_with_tools_polza(deal_context)
 
         else:
-            previous_context = db_select_context_lt(cursor, common_deal_id, previous_last_note_time)
+            previous_context = db_select_context_lt(cursor, common_deal_id, previous_last_note_time+1)
             new_context = db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
             # Создаем единый конеткст
             previous_context_str = notes_to_string(previous_context)
@@ -357,7 +385,7 @@ async def generate_tasks_scores(
         db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
         conn.commit()
 
-        return {"status": "ok", "response": llm_answer}
+        return {"status": "ok", "used_context": deal_context, "response": llm_answer}
 
     except Exception as e:
         # Любая ошибка => откат всей пачки
@@ -381,6 +409,67 @@ async def generate_tasks_scores(
             pass
 
 
+@app.get("/prompt/latest")
+async def get_latest_prompt(api_key: str = Depends(check_api_key)):
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        row = db_select_last_prompt(cursor)
+        if row is None:
+            return {"id": 0, "system_prompt": ""}
+
+        pid, system_prompt = row
+        return {"id": int(pid), "system_prompt": system_prompt or ""}
+
+    except Error:
+        raise HTTPException(status_code=500, detail="DB error")
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
+
+
+@app.post("/prompt")
+async def create_prompt(body: PromptIn, api_key: str = Depends(check_api_key)):
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        new_id = db_insert_prompt(cursor, body.system_prompt)
+        conn.commit()
+
+        return {"status": "ok", "id": new_id}
+
+    except Error:
+        try:
+            if conn is not None:
+                conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="DB error")
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
 
 @app.get("/health")
 async def health_check():
