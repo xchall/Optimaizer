@@ -46,11 +46,22 @@ app = FastAPI()
 class PromptIn(BaseModel):
     system_prompt: str
 
+def segments_to_text(segments: list[dict]) -> str:
+    # speaker_0: ...\n speaker_1: ...
+    return "\n".join(
+        f"{s.get('speaker','')}: {s.get('text','')}".strip(": ")
+        for s in segments
+        if s.get("text")
+    )
+
 def transcribe(external_audio_path: str) -> str:
     data = {
         "url": external_audio_path,
         "response_format": "json",
-        "task": "transcribe",
+        # "task": "transcribe",
+        "task": "diarize",
+        "num_speakers": 2,
+        "diarization_setting": "telephonic"
     }
 
     try:
@@ -59,12 +70,15 @@ def transcribe(external_audio_path: str) -> str:
 
         result = response.json()
         text = result.get("text")
-
+        segments = result.get("segments")
         if not text:
             print("⚠️ Nexara вернула ответ без поля 'text':", result)
             return None
+        if not segments:
+            print("⚠️ Nexara вернула ответ без поля 'segments':", result)
+            return None
 
-        return text
+        return segments_to_text(segments)
     except requests.exceptions.Timeout: # если ждем ответ дольше 90 секунд
         print("⛔ Ошибка: Nexara не ответила вовремя (timeout)")
         return None
@@ -206,7 +220,9 @@ def notes_to_string(notes: list[tuple[Any, ...]]) -> str:
     for note in notes:
         note_type ="Тип заметки: "
         if note[4] == "call_out":
-            note_type += "звонок"
+            note_type += "звонок исходящий"
+        elif note[4] == "call_in":
+            note_type += "звонок входящий"
         else:
             note_type += "текст"
 
@@ -324,7 +340,18 @@ async def generate_tasks_scores(
 
                 payload_text = text
                 last_note_time = created_at
+            elif note_type == "call_in":
+                link = item.get("params", {}).get("link")
+                if not link:
+                    raise ValueError("call_in without link")
 
+                text = transcribe(link)
+                if text is None:
+                    # <-- вот тут “провал” => откатим всё
+                    raise RuntimeError(f"Transcription failed for link: {link}")
+
+                payload_text = text
+                last_note_time = created_at
             # Текстовая заметка
             elif note_type == "common":
                 text = item.get("params", {}).get("text")
