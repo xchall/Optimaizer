@@ -35,9 +35,6 @@ DB_CONFIG = {
     "database": mysql_db
 }
 
-print(client.is_ready())
-
-
 API_POLZA_AI = os.getenv("API_POLZA_AI")
 
 def db_select_last_prompt() -> Optional[tuple[int, Optional[str]]]:
@@ -124,12 +121,6 @@ LOCAL_TOOLS = {
     "BooksVectorSearch": BooksVectorSearch
 }
 
-polza = OpenAI(
-    base_url="https://api.polza.ai/api/v1",
-    api_key=API_POLZA_AI,
-)
-
-
 def run_with_tools_polza(prompt: str) -> str:
     id, sys_prompt = db_select_last_prompt()
     SYSTEM_PROMPT = str(sys_prompt)
@@ -190,20 +181,6 @@ def run_with_tools_polza(prompt: str) -> str:
                     "remains_rounds": rounds_left,
                 }
 
-                messages.append({
-                    "role": "tool",
-                    "name": name,
-                    "tool_call_id": tc.id,
-                    "content": json.dumps(wrapped_content, ensure_ascii=False),
-                })
-
-            continue
-
-        # Если tool_calls нет — это финальный ответ модели
-        return msg.content
-
-    return "Ошибка: слишком много раундов tool-calls"
-root@msk-1-vm-4ax0:/opt/optimizer#
                 messages.append({
                     "role": "tool",
                     "name": name,

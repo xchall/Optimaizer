@@ -76,7 +76,7 @@ def transcribe(external_audio_path: str) -> str:
             return None
         if not segments:
             print("⚠️ Nexara вернула ответ без поля 'segments':", result)
-            return None
+            return text
 
         return segments_to_text(segments)
     except requests.exceptions.Timeout: # если ждем ответ дольше 90 секунд
@@ -309,7 +309,7 @@ async def generate_tasks_scores(
 
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
-        conn.autocommit = False  # одна транзакция на весь цикл
+        conn.autocommit = False  # выключили автокоvмит
         cursor = conn.cursor()
 
         previous_last_note_time = 0
@@ -374,9 +374,9 @@ async def generate_tasks_scores(
                 note_type=note_type,
                 payload=payload_text,
             )
-
-        # Если дошли сюда — всё ок, фиксируем
-        conn.commit()
+            # Если дошли сюда — всё ок, фиксируем каждый отдельный item
+            # Если хоть 1 с ошибкой, все до него уже будут сохранены в бд, а после него не обработаются
+            conn.commit()
 
         # Извлекаем из бд все записи, которые относятся к этой сделке
         if last_note_time == 0:
