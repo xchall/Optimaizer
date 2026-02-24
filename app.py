@@ -15,6 +15,54 @@ from datetime import datetime
 from  polza_ai_module import run_with_tools_polza
 load_dotenv()
 
+# Настройка логирования
+
+import logging
+import sys
+logger = logging.getLogger("app")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+
+fmt = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+# INFO и ниже -> info.log
+fh_info = logging.FileHandler("/var/log/optimizer_fastapi_info.log", encoding="utf-8")
+fh_info.setLevel(logging.INFO)
+fh_info.setFormatter(fmt)
+
+class _InfoOnly(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno <= logging.INFO
+
+fh_info.addFilter(_InfoOnly())
+
+# WARNING и выше -> err.log
+fh_err = logging.FileHandler("/var/log/optimizer_fastapi_err.log", encoding="utf-8")
+fh_err.setLevel(logging.WARNING)
+fh_err.setFormatter(fmt)
+
+# INFO и ниже -> stdout
+h_out = logging.StreamHandler(sys.stdout)
+h_out.setLevel(logging.INFO)
+h_out.setFormatter(fmt)
+h_out.addFilter(_InfoOnly())
+
+# WARNING и выше -> stderr
+h_err = logging.StreamHandler(sys.stderr)
+h_err.setLevel(logging.WARNING)
+h_err.setFormatter(fmt)
+
+# записываем в файлы
+logger.addHandler(fh_info)
+logger.addHandler(fh_err)
+#пойдут в journal
+logger.addHandler(h_out)
+logger.addHandler(h_err)
+
+
 API_KEY = os.getenv("OPTIMIZER_API_KEY")
 
 api_key_header = APIKeyHeader(name="X-API-Key")
@@ -415,12 +463,12 @@ async def generate_tasks_scores(
         return {"status": "ok", "used_context": deal_context, "response": llm_answer}
 
     except Exception as e:
-        # Любая ошибка => откат всей пачки
         try:
             if conn is not None:
                 conn.rollback()
         except Exception:
             pass
+
         raise HTTPException(status_code=400, detail=str(e))
 
     finally:
