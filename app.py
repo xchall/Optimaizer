@@ -19,7 +19,7 @@ load_dotenv()
 
 import logging
 import sys
-logger = logging.getLogger("app")
+logger = logging.getLogger("app_logger")
 logger.setLevel(logging.INFO)
 logger.propagate = False
 
@@ -119,53 +119,42 @@ def transcribe(external_audio_path: str) -> str:
         result = response.json()
         text = result.get("text")
         segments = result.get("segments")
+        #логи дублирующие
         if not text:
-            print("⚠️ Nexara вернула ответ без поля 'text':", result)
+            logger.warning("Nexara вернула ответ без поля 'text':", result)
             return None
         if not segments:
-            print("⚠️ Nexara вернула ответ без поля 'segments':", result)
+            logger.warning("⚠Nexara вернула ответ без поля 'segments':", result)
             return text
 
         return segments_to_text(segments)
     except requests.exceptions.Timeout: # если ждем ответ дольше 90 секунд
-        print("⛔ Ошибка: Nexara не ответила вовремя (timeout)")
+        logger.error("Ошибка: Nexara не ответила вовремя (timeout)")
         return None
 
     except requests.exceptions.RequestException as e:
-        print("⛔ Ошибка HTTP при обращении к Nexara:", str(e))
+        logger.error("Ошибка HTTP при обращении к Nexara:", str(e))
         return None
 
     except ValueError:
-        print("⛔ Ошибка: Nexara вернула не‑JSON ответ")
+        logger.error("Ошибка: Nexara вернула не‑JSON ответ")
         return None
 
     except Exception as e:
-        print("⛔ Непредвиденная ошибка транскрибации:", str(e))
+        logger.error("Непредвиденная ошибка транскрибации:", str(e))
         return None
 
 
-def db_get_last_time_by_deal_id(deal_id: int) -> int:
-    conn = None
-    try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT COALESCE(MAX(created_at), 0) AS last_time "
-            "FROM `context` WHERE deal_id = %s",
-            (deal_id,)
-        )
-        (last_time,) = cursor.fetchone()
-        return int(last_time)
+def db_get_last_time_by_deal_id(cursor, deal_id: int) -> int:
+    cursor.execute(
+        "SELECT COALESCE(MAX(created_at), 0) AS last_time "
+        "FROM `context` WHERE deal_id = %s",
+        (deal_id,)
+    )
+    (last_time,) = cursor.fetchone()
+    return int(last_time)
 
-    except Error as e:
-        # Ошибка базы
-        raise
-    finally:
-        try:
-            if conn is not None and conn.is_connected():
-                conn.close()
-        except Exception:
-            pass
+
 
 #Сохранение note
 def db_insert_context(cursor, deal_id: int, created_at: int, updated_at: int, note_type: str, payload: str | None):
@@ -285,9 +274,15 @@ async def get_last_time_by_deal_id(
     deal_id: int,
     api_key: str = Depends(check_api_key),
 ):
+    conn = None
+    cursor = None
     try:
-        last_time = db_get_last_time_by_deal_id(deal_id)
-    except Error:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        last_time = db_get_last_time_by_deal_id(cursor, deal_id)
+    except Error as e:
+        logger.error("/get_last_time_by_deal_id/{deal_id} Ошибка базы данных %s", e)
         raise HTTPException(status_code=500, detail="DB error")
 
     # если нет записей — вернется 0
@@ -332,6 +327,7 @@ async def get_llm_answer(
         }
 
     except Error:
+        logger.exception("/llm_answer/{deal_id} упал")
         raise HTTPException(status_code=500, detail="DB error")
 
     finally:
@@ -454,6 +450,7 @@ async def generate_tasks_scores(
             else:
                 deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
                                                                        f"основан только на старом контексте, без последних заметок {previous_result[2]}")
+
             llm_answer = run_with_tools_polza(deal_context)
 
         # нужно записать ответ в таблицу results
@@ -463,12 +460,7 @@ async def generate_tasks_scores(
         return {"status": "ok", "used_context": deal_context, "response": llm_answer}
 
     except Exception as e:
-        try:
-            if conn is not None:
-                conn.rollback()
-        except Exception:
-            pass
-
+        logger.exception("/generate_tasks_scores упал")  # traceback в лог
         raise HTTPException(status_code=400, detail=str(e))
 
     finally:
@@ -500,6 +492,7 @@ async def get_latest_prompt(api_key: str = Depends(check_api_key)):
         return {"id": int(pid), "system_prompt": system_prompt or ""}
 
     except Error:
+        logger.exception("/prompt/latest не сработал")
         raise HTTPException(status_code=500, detail="DB error")
     finally:
         try:
@@ -528,6 +521,7 @@ async def create_prompt(body: PromptIn, api_key: str = Depends(check_api_key)):
         return {"status": "ok", "id": new_id}
 
     except Error:
+        logger.exception("/prompt не сработал")
         try:
             if conn is not None:
                 conn.rollback()
@@ -557,4 +551,5 @@ if __name__ == "__main__":
         app,
         host="0.0.0.0",
         port=8080,
+        access_log=True # логируем дерганья ручек и responses в journal (это через sys.stdout или sys.stderr)
 )
