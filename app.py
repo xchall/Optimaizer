@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Response, Depends, Request, status, Body
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel
-from typing import Optional, Any, Dict
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from typing import Optional, Any, Dict, List
 from itsdangerous import URLSafeSerializer, BadSignature
 import mysql.connector
 from mysql.connector import Error
@@ -15,7 +15,40 @@ from datetime import datetime
 from  polza_ai_module import run_with_tools_polza
 load_dotenv()
 
-# Настройка логирования
+
+# pydantic модели -----
+
+class SelfLink(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    href: HttpUrl  # валидируем url
+
+class Links(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    self: SelfLink
+
+class Note(BaseModel):
+    model_config = ConfigDict(extra="ignore")  # игнорировать лишние поля в ответе
+    id: int
+    entity_id: int
+    created_by: int
+    updated_by: int
+    created_at: int
+    updated_at: int
+    responsible_user_id: int
+    group_id: int
+    note_type: str
+    params: Dict[str, Any]  # содержимое не валидируем
+    account_id: int
+    links: Links = Field(alias="_links")  # в JSON поле "_links"
+
+class Notes(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    notes: List[Note]
+
+# ---------------------
+
+
+# Настройка логирования ----------------------
 
 import logging
 import sys
@@ -62,6 +95,7 @@ logger.addHandler(fh_err)
 logger.addHandler(h_out)
 logger.addHandler(h_err)
 
+#------------------------------------------------
 
 API_KEY = os.getenv("OPTIMIZER_API_KEY")
 
@@ -345,7 +379,7 @@ async def get_llm_answer(
 @app.post("/generate_tasks_scores")
 async def generate_tasks_scores(
     request: Request,
-    body: list = Body(...),
+    body: Notes,
     api_key: str = Depends(check_api_key),
 ):
     conn = None
@@ -360,11 +394,11 @@ async def generate_tasks_scores(
         last_note_time = 0
         flag_for_previous_last_note_time = 1
         common_deal_id = 0
-        for item in body:
-            created_at = int(item.get("created_at"))
-            updated_at = int(item.get("updated_at"))
-            deal_id = int(item.get("entity_id"))
-            note_type = item.get("note_type")
+        for note in body.notes:
+            created_at = note.created_at
+            updated_at = note.updated_at
+            deal_id = note.entity_id
+            note_type = note.note_type
 
             if flag_for_previous_last_note_time == 1:
                 previous_last_note_time = db_get_last_time_by_deal_id(deal_id)
@@ -376,8 +410,8 @@ async def generate_tasks_scores(
                 continue
             # Звонок
             if note_type == "call_out":
-                link = item.get("params", {}).get("link")
-                if item.get("params", {}).get("call_status") == 4 and item.get("params", {}).get("duration") > 0:
+                link = note.get("params", {}).get("link")
+                if note.get("params", {}).get("call_status") == 4 and note.get("params", {}).get("duration") > 0:
                     if not link:
                         raise ValueError("call_out without link")
                     text = transcribe(link)
@@ -389,8 +423,8 @@ async def generate_tasks_scores(
                 payload_text = text
                 last_note_time = created_at
             elif note_type == "call_in":
-                link = item.get("params", {}).get("link")
-                if item.get("params", {}).get("call_status") == 4 and item.get("params", {}).get("duration") > 0:
+                link = note.get("params", {}).get("link")
+                if note.get("params", {}).get("call_status") == 4 and note.get("params", {}).get("duration") > 0:
                     if not link:
                         raise ValueError("call_out without link")
                     text = transcribe(link)
@@ -403,7 +437,7 @@ async def generate_tasks_scores(
                 last_note_time = created_at
             # Текстовая заметка
             elif note_type == "common":
-                text = item.get("params", {}).get("text")
+                text = note.get("params", {}).get("text")
                 if not text:
                     raise ValueError("common without text")
                 payload_text = text
@@ -412,7 +446,7 @@ async def generate_tasks_scores(
                 continue # просто игнорируем attachments и другие
                 # raise ValueError(f"Unknown note_type: {note_type}")
 
-            # Сохраняем заметку note в БД 
+            # Сохраняем заметку note в БД
             db_insert_context(
                 cursor=cursor,
                 deal_id=deal_id,
@@ -421,7 +455,7 @@ async def generate_tasks_scores(
                 note_type=note_type,
                 payload=payload_text,
             )
-            # Если дошли сюда — всё ок, фиксируем каждый отдельный item
+            # Если дошли сюда — всё ок, фиксируем каждый отдельный note
             # Если хоть 1 с ошибкой, все до него уже будут сохранены в бд, а после него не обработаются
             conn.commit()
 
