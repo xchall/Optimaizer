@@ -123,7 +123,12 @@ DB_CONFIG = {
     "database": mysql_db
 }
 
-app = FastAPI()
+app = FastAPI(
+    title="Optimizer2.0 or Shturman API",
+    description="Сервис для генерации скорингов и постановки задач по известным notes из сделки",
+    version="1.0.0",
+)
+
 
 class PromptIn(BaseModel):
     system_prompt: str
