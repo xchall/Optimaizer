@@ -365,33 +365,38 @@ async def generate_tasks_scores(
             updated_at = int(item.get("updated_at"))
             deal_id = int(item.get("entity_id"))
             note_type = item.get("note_type")
+
             if flag_for_previous_last_note_time == 1:
                 previous_last_note_time = db_get_last_time_by_deal_id(deal_id)
                 common_deal_id = deal_id
                 flag_for_previous_last_note_time = 0
             payload_text = None
 
+            if created_at < previous_last_note_time:
+                continue
             # Звонок
             if note_type == "call_out":
                 link = item.get("params", {}).get("link")
-                if not link:
-                    raise ValueError("call_out without link")
-
-                text = transcribe(link)
+                if item.get("params", {}).get("call_status") == 4 and item.get("params", {}).get("duration") > 0:
+                    if not link:
+                        raise ValueError("call_out without link")
+                    text = transcribe(link)
+                else:
+                    text = "Не дозвонились до клиента."
                 if text is None:
-                    # <-- вот тут “провал” => откатим всё
                     raise RuntimeError(f"Transcription failed for link: {link}")
 
                 payload_text = text
                 last_note_time = created_at
             elif note_type == "call_in":
                 link = item.get("params", {}).get("link")
-                if not link:
-                    raise ValueError("call_in without link")
-
-                text = transcribe(link)
+                if item.get("params", {}).get("call_status") == 4 and item.get("params", {}).get("duration") > 0:
+                    if not link:
+                        raise ValueError("call_out without link")
+                    text = transcribe(link)
+                else:
+                    text = "Клиент не дозвонился."
                 if text is None:
-                    # <-- вот тут “провал” => откатим всё
                     raise RuntimeError(f"Transcription failed for link: {link}")
 
                 payload_text = text
@@ -403,13 +408,11 @@ async def generate_tasks_scores(
                     raise ValueError("common without text")
                 payload_text = text
                 last_note_time = created_at
-
             else:
-                # если неизвестный note_type — реши сам:
-                # либо игнорировать, либо считать ошибкой и откатывать
-                raise ValueError(f"Unknown note_type: {note_type}")
+                continue # просто игнорируем attachments и другие
+                # raise ValueError(f"Unknown note_type: {note_type}")
 
-            # <-- Сохраняем запись в БД (в рамках транзакции)
+            # Сохраняем заметку note в БД 
             db_insert_context(
                 cursor=cursor,
                 deal_id=deal_id,
