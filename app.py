@@ -406,7 +406,7 @@ async def generate_tasks_scores(
             note_type = note.note_type
 
             if flag_for_previous_last_note_time == 1:
-                previous_last_note_time = db_get_last_time_by_deal_id(deal_id)
+                previous_last_note_time = db_get_last_time_by_deal_id(cursor, deal_id)
                 common_deal_id = deal_id
                 flag_for_previous_last_note_time = 0
             payload_text = None
