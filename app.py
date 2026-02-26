@@ -415,8 +415,8 @@ async def generate_tasks_scores(
                 continue
             # Звонок
             if note_type == "call_out":
-                link = note.get("params", {}).get("link")
-                if note.get("params", {}).get("call_status") == 4 and note.get("params", {}).get("duration") > 0:
+                link = note.params.get("link")
+                if note.params.get("call_status") == 4 and note.params.get("duration") > 0:
                     if not link:
                         raise ValueError("call_out without link")
                     text = transcribe(link)
@@ -428,8 +428,8 @@ async def generate_tasks_scores(
                 payload_text = text
                 last_note_time = created_at
             elif note_type == "call_in":
-                link = note.get("params", {}).get("link")
-                if note.get("params", {}).get("call_status") == 4 and note.get("params", {}).get("duration") > 0:
+                link = note.params.get("link")
+                if note.params.get("call_status") == 4 and note.params.get("duration") > 0:
                     if not link:
                         raise ValueError("call_out without link")
                     text = transcribe(link)
@@ -442,7 +442,7 @@ async def generate_tasks_scores(
                 last_note_time = created_at
             # Текстовая заметка
             elif note_type == "common":
-                text = note.get("params", {}).get("text")
+                text = note.params.get("text")
                 if not text:
                     raise ValueError("common without text")
                 payload_text = text
