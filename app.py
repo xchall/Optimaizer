@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import os
 import uvicorn
 import requests
+import httpx
 
 from datetime import datetime
 from  polza_ai_module import run_with_tools_polza
@@ -41,60 +42,27 @@ class Note(BaseModel):
     account_id: int
     links: Links = Field(alias="_links")  # в JSON поле "_links"
 
-class Notes(BaseModel):
+class Lead(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    notes: List[Note]
+    id: int
+    name: str
+
+
+class LeadNotesPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    lead: Lead
+
+    # может отсутствовать или быть пустым -> не падаем
+    notes: List[Note] = Field(default_factory=list)
+
+    # "54538054": [Note, Note] ... -> тоже может отсутствовать
+    contact_notes: Dict[str, List[Note]] = Field(default_factory=dict)
 
 # ---------------------
 
 
 # Настройка логирования ----------------------
-
-import logging
-import sys
-logger = logging.getLogger("app_logger")
-logger.setLevel(logging.INFO)
-logger.propagate = False
-
-fmt = logging.Formatter(
-    "%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-
-# INFO и ниже -> info.log
-fh_info = logging.FileHandler("/var/log/optimizer_fastapi_info.log", encoding="utf-8")
-fh_info.setLevel(logging.INFO)
-fh_info.setFormatter(fmt)
-
-class _InfoOnly(logging.Filter):
-    def filter(self, record: logging.LogRecord) -> bool:
-        return record.levelno <= logging.INFO
-
-fh_info.addFilter(_InfoOnly())
-
-# WARNING и выше -> err.log
-fh_err = logging.FileHandler("/var/log/optimizer_fastapi_err.log", encoding="utf-8")
-fh_err.setLevel(logging.WARNING)
-fh_err.setFormatter(fmt)
-
-# INFO и ниже -> stdout
-h_out = logging.StreamHandler(sys.stdout)
-h_out.setLevel(logging.INFO)
-h_out.setFormatter(fmt)
-h_out.addFilter(_InfoOnly())
-
-# WARNING и выше -> stderr
-h_err = logging.StreamHandler(sys.stderr)
-h_err.setLevel(logging.WARNING)
-h_err.setFormatter(fmt)
-
-# записываем в файлы
-logger.addHandler(fh_info)
-logger.addHandler(fh_err)
-#пойдут в journal
-logger.addHandler(h_out)
-logger.addHandler(h_err)
-
+from logging_setup import logger
 #------------------------------------------------
 
 API_KEY = os.getenv("OPTIMIZER_API_KEY")
@@ -126,7 +94,7 @@ DB_CONFIG = {
 app = FastAPI(
     title="Optimizer2.0 or Shturman API",
     description="Сервис для генерации скорингов и постановки задач по известным notes из сделки",
-    version="1.0.0",
+    version="1.1.0",
 )
 
 
@@ -141,7 +109,7 @@ def segments_to_text(segments: list[dict]) -> str:
         if s.get("text")
     )
 
-def transcribe(external_audio_path: str) -> str:
+def transcribe(external_audio_path: str) -> Optional[str]:
     data = {
         "url": external_audio_path,
         "response_format": "json",
@@ -160,10 +128,10 @@ def transcribe(external_audio_path: str) -> str:
         segments = result.get("segments")
         #логи дублирующие
         if not text:
-            logger.warning("Nexara вернула ответ без поля 'text':", result)
+            logger.warning("Nexara вернула ответ без поля 'text': %s", result)
             return None
         if not segments:
-            logger.warning("⚠Nexara вернула ответ без поля 'segments':", result)
+            logger.warning("⚠Nexara вернула ответ без поля 'segments': %s", result)
             return text
 
         return segments_to_text(segments)
@@ -172,15 +140,15 @@ def transcribe(external_audio_path: str) -> str:
         return None
 
     except requests.exceptions.RequestException as e:
-        logger.error("Ошибка HTTP при обращении к Nexara:", str(e))
+        logger.error("Ошибка HTTP при обращении к Nexara: %s", e)
         return None
 
     except ValueError:
-        logger.error("Ошибка: Nexara вернула не‑JSON ответ")
+        logger.error("Ошибка: Nexara вернула не‑JSON ответ ")
         return None
 
     except Exception as e:
-        logger.error("Непредвиденная ошибка транскрибации:", str(e))
+        logger.error("Непредвиденная ошибка транскрибации: %s", e)
         return None
 
 
@@ -196,13 +164,18 @@ def db_get_last_time_by_deal_id(cursor, deal_id: int) -> int:
 
 
 #Сохранение note
-def db_insert_context(cursor, deal_id: int, created_at: int, updated_at: int, note_type: str, payload: str | None):
+def db_insert_context(cursor, note_id: int, deal_id: int, created_at: int, updated_at: int, note_type: str, payload: str | None,
+                      processed_ok: int,  # 1 = ok, 0 = fail
+                      ):
     cursor.execute(
         """
-        INSERT INTO `context` (deal_id, created_at, updated_at, note_type, payload)
-        VALUES (%s, %s, %s, %s, %s)
+        INSERT INTO `context` (id, deal_id, created_at, updated_at, note_type, payload, processed_ok)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+            payload = VALUES(payload),
+            processed_ok = VALUES(processed_ok)
         """,
-        (deal_id, created_at, updated_at, note_type, payload),
+        (note_id, deal_id, created_at, updated_at, note_type, payload, processed_ok),
     )
 
 def db_select_context_lt(cursor, deal_id: int, created_at_limit: int) -> list[tuple[Any, ...]]:
@@ -291,6 +264,11 @@ def db_insert_prompt(cursor, system_prompt: str) -> int:
     )
     return int(cursor.lastrowid)
 
+def db_get_processed_ok(cursor, note_id: int) -> int | None:
+    cursor.execute("SELECT processed_ok FROM `context` WHERE id = %s LIMIT 1", (note_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
 def notes_to_string(notes: list[tuple[Any, ...]]) -> str:
     out_str = ""
     for note in notes:
@@ -305,6 +283,17 @@ def notes_to_string(notes: list[tuple[Any, ...]]) -> str:
         normal_time = datetime.fromtimestamp(note[2])
         out_str += f" Время заметки: {normal_time}. {note_type}. Содержание заметки: {note[5]}."
     return out_str
+
+def flatten_notes(payload: LeadNotesPayload) -> List[Note]:
+    all_notes: List[Note] = []
+    all_notes.extend(payload.notes)
+
+    for _, notes_list in payload.contact_notes.items():
+        all_notes.extend(notes_list)
+
+    # чтобы "по порядку" было стабильно и одинаково всегда — сортируем по времени
+    all_notes.sort(key=lambda n: n.created_at)
+    return all_notes
 
 # -------------------- Роуты --------------------
 
@@ -349,7 +338,7 @@ async def get_llm_answer(
             # не ищем предыдущий ответ, его не было
 
             llm_answer = run_with_tools_polza(deal_context)
-            last_note_time = db_get_last_time_by_deal_id(deal_id)
+            last_note_time = db_get_last_time_by_deal_id(cursor, deal_id)
             db_insert_result(cursor, deal_id, last_note_time, last_note_time, "common", llm_answer)
             conn.commit()
             return {
@@ -381,125 +370,183 @@ async def get_llm_answer(
         except Exception:
             pass
 
-@app.post("/generate_tasks_scores")
+
+EXTERNAL_BASE = "http://217.199.253.86:8000/api/leads/all_data"
+
+
+@app.get("/generate_tasks_scores/{deal_id}")
 async def generate_tasks_scores(
-    request: Request,
-    body: Notes,
+    deal_id: int,
     api_key: str = Depends(check_api_key),
 ):
     conn = None
     cursor = None
 
     try:
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{EXTERNAL_BASE}/{deal_id}")
+            if r.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"Upstream error: {r.status_code}")
+        payload = LeadNotesPayload.model_validate(r.json())
+
+        common_deal_id = payload.lead.id
+        lead_name = payload.lead.name # Пока не используем
+
+        notes_to_process = flatten_notes(payload)
+
         conn = mysql.connector.connect(**DB_CONFIG)
         conn.autocommit = False  # выключили автокоvмит
         cursor = conn.cursor()
 
-        previous_last_note_time = 0
-        last_note_time = 0
-        flag_for_previous_last_note_time = 1
-        common_deal_id = 0
-        for note in body.notes:
+        previous_last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id) # до вставки и обновления данных узнаем, какой был
+
+        for note in notes_to_process:
+            processed_ok = 1 # флаг, показывающий успешность обработки заметки
+
+            note_id = note.id
+            processed = db_get_processed_ok(cursor, note_id)
+            if processed == 1:
+                continue # пропускаем эту заметку, так как она уже в бд со всей информацией
+
             created_at = note.created_at
             updated_at = note.updated_at
-            deal_id = note.entity_id
+            entity_id = note.entity_id # не используем
             note_type = note.note_type
 
-            if flag_for_previous_last_note_time == 1:
-                previous_last_note_time = db_get_last_time_by_deal_id(cursor, deal_id)
-                common_deal_id = deal_id
-                flag_for_previous_last_note_time = 0
             payload_text = None
 
-            if created_at < previous_last_note_time:
-                continue
-            # Звонок
-            if note_type == "call_out":
+            if note_type == "call_out": # Исходящий
                 link = note.params.get("link")
-                if note.params.get("call_status") == 4 and note.params.get("duration") > 0:
+                if note.params.get("call_status") == 4:
                     if not link:
-                        raise ValueError("call_out without link")
-                    text = transcribe(link)
+                        logger.error("call_out without link")
+                        text = f"не удалось транскрибировать звонок (нет ссылки на звонок) id = {note_id}"
+                        processed_ok = 0
+                    else:
+                        text = transcribe(link)
+                        if text is None: # 1 retry для транскрибации
+                            logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
+                            text = transcribe(link)
                 else:
                     text = "Не дозвонились до клиента."
                 if text is None:
-                    raise RuntimeError(f"Transcription failed for link: {link}")
+                    logger.error(f"Transcription failed for link: {link}")
+                    text = f"не удалось транскрибировать звонок id = {note_id}"
+                    processed_ok = 0
 
                 payload_text = text
-                last_note_time = created_at
-            elif note_type == "call_in":
+            elif note_type == "call_in": # Входящий звонок
                 link = note.params.get("link")
-                if note.params.get("call_status") == 4 and note.params.get("duration") > 0:
+                if note.params.get("call_status") == 4:
                     if not link:
-                        raise ValueError("call_out without link")
-                    text = transcribe(link)
+                        logger.error("call_in without link")
+                        text = f"не удалось транскрибировать звонок (нет ссылки на звонок) id = {note_id}"
+                        processed_ok = 0
+                    else:
+                        text = transcribe(link)
+                        if text is None:
+                            logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
+                            text = transcribe(link)
                 else:
                     text = "Клиент не дозвонился."
                 if text is None:
-                    raise RuntimeError(f"Transcription failed for link: {link}")
+                    logger.error(f"Transcription failed for link: {link}")
+                    text = f"не удалось транскрибировать звонок id = {note_id}"
+                    processed_ok = 0
 
                 payload_text = text
-                last_note_time = created_at
-            # Текстовая заметка
-            elif note_type == "common":
+            elif note_type == "common":  # Текстовая заметка
                 text = note.params.get("text")
                 if not text:
-                    raise ValueError("common without text")
+                    logger.error("common note without text")
+                    text = "содержимое заметки отсутствует"
+                    processed_ok = 0
                 payload_text = text
-                last_note_time = created_at
             else:
                 continue # просто игнорируем attachments и другие
-                # raise ValueError(f"Unknown note_type: {note_type}")
+
+            if processed == 0 and processed_ok == 0: # если уже есть в бд заметка без содержимого, мы не обновляем на неё же без содержимого
+                continue
 
             # Сохраняем заметку note в БД
             db_insert_context(
                 cursor=cursor,
+                note_id=note_id,
                 deal_id=deal_id,
                 created_at=created_at,
                 updated_at=updated_at,
                 note_type=note_type,
                 payload=payload_text,
+                processed_ok=processed_ok,
             )
             # Если дошли сюда — всё ок, фиксируем каждый отдельный note
-            # Если хоть 1 с ошибкой, все до него уже будут сохранены в бд, а после него не обработаются
             conn.commit()
 
-        # Извлекаем из бд все записи, которые относятся к этой сделке
-        if last_note_time == 0:
-            return {"status": "empty_notes"}
+
         if previous_last_note_time == 0:# не было предыдущего контекста, и соответственно предыдущего результатат llm
-            res = db_select_context_lt(cursor,common_deal_id, last_note_time+1) # из-за строгого сравнения, чтобы не потерять +60 сек
+            res = db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
+            if not res:
+                return {
+                    "status": "ok",
+                    "used_context": "Отсутствует",
+                    "response": "Нет контекста -> нет расчета скоров и постановки задач"
+                }
+
             deal_context = notes_to_string(res)
-
             #не ищем предыдущий ответ, его не было
-
             llm_answer = run_with_tools_polza(deal_context)
 
         else:
             previous_context = db_select_context_lt(cursor, common_deal_id, previous_last_note_time+1)
-            new_context = db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
-            # Создаем единый конеткст
             previous_context_str = notes_to_string(previous_context)
-            new_context_str = notes_to_string(new_context)
-            deal_context_without_previous_result = (" SYSTEM_INFO: старый контекст (раннее известный)" + previous_context_str +
-                            " SYSTEM_INFO: далее идет новый контекст (новые заметки в рамках сделки)"
-                           +  new_context_str)
+            new_context = db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
+            if not new_context:
+                # Если уже есть старый ответ LLM вернем именно его, иначе сгенерируем новый
+                result = db_select_last_result_by_deal_id(cursor, deal_id)
+                # если записей нет
+                if result is None:
+                    res = db_select_context_gt(cursor, deal_id,
+                                               0)
+                    deal_context = notes_to_string(res)
 
-            #находим предыдущий ответ модели
-            previous_result = db_select_last_result_by_deal_id(cursor, common_deal_id)
-            if previous_result is None:
-                deal_context = deal_context_without_previous_result
+                    # не ищем предыдущий ответ, его не было
+
+                    llm_answer = run_with_tools_polza(deal_context)
+                else:
+                    found_deal_id, created_at, llm_answer = result
+                    return {
+                        "status": "ok",
+                        "used_context": previous_context_str,
+                        "response": llm_answer,
+                    }
             else:
-                deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
-                                                                       f"основан только на старом контексте, без последних заметок {previous_result[2]}")
+                # Создаем единый конетекст
 
-            llm_answer = run_with_tools_polza(deal_context)
+                new_context_str = notes_to_string(new_context)
+                deal_context_without_previous_result = (" SYSTEM_INFO: старый контекст (раннее известный)" + previous_context_str +
+                                " SYSTEM_INFO: далее идет новый контекст (новые заметки в рамках сделки)"
+                               +  new_context_str)
 
+                #находим предыдущий ответ модели
+                previous_result = db_select_last_result_by_deal_id(cursor, common_deal_id)
+                if previous_result is None:
+                    deal_context = deal_context_without_previous_result
+                else:
+                    deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
+                                                                           f"основан только на старом контексте, без последних заметок {previous_result[2]}")
+                llm_answer = run_with_tools_polza(deal_context)
+
+        last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id)
         # нужно записать ответ в таблицу results
         db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
         conn.commit()
 
-        return {"status": "ok", "used_context": deal_context, "response": llm_answer}
+        return {
+            "status": "ok",
+            "used_context": deal_context,
+            "response": llm_answer
+        }
 
     except Exception as e:
         logger.exception("/generate_tasks_scores упал")  # traceback в лог
@@ -516,7 +563,6 @@ async def generate_tasks_scores(
                 conn.close()
         except Exception:
             pass
-
 
 @app.get("/prompt/latest")
 async def get_latest_prompt(api_key: str = Depends(check_api_key)):

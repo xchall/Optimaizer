@@ -13,6 +13,9 @@ import mysql.connector
 from mysql.connector import Error
 from typing import List, Union
 import re
+# Настройка логирования
+from logging_setup import logger
+
 
 load_dotenv()  # загружаем переменные среды из .env файла
 
@@ -173,7 +176,7 @@ def run_with_tools_polza(prompt: str) -> str:
                 obj = ToolClass(**args)
                 tool_result = obj.process()
                 print(name, args)
-
+                logger.info("Использован Function Calling: %s (%s)" % (name, args))
                 wrapped_content = {
                     "tool_name": name,
                     "tool_args": args,
