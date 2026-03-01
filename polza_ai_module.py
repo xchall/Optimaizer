@@ -170,13 +170,38 @@ def run_with_tools_polza(prompt: str) -> str:
                 tc = msg.tool_calls[i]
                 name = tc.function.name
 
-                # парсим аргументы и запускаем локальный Pydantic-класс
-                args = json.loads(tc.function.arguments or "{}")
-                ToolClass = LOCAL_TOOLS[name]
-                obj = ToolClass(**args)
-                tool_result = obj.process()
+                # 1) Парсинг аргументов тоже может упасть — страхуем
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except Exception as e:
+                    args = {}
+                    logger.exception("Tool args parse failed for %s: %s", name, str(e))
+
+                ToolClass = LOCAL_TOOLS.get(name)
+
+                # 2) Если tool неизвестен — тоже не падаем
+                if ToolClass is None:
+                    tool_result = {
+                        "ok": False,
+                        "error": f"Unknown tool: {name}"
+                    }
+                    logger.error("Unknown tool requested: %s", name)
+                else:
+                    # 3) Выполнение tool-а — страхуем
+                    try:
+                        obj = ToolClass(**args)
+                        tool_result = obj.process()
+                        logger.info("Использован Function Calling: %s (%s)" % (name, args))
+                    except Exception as e:
+                        logger.exception("Tool %s failed with args=%s", name, args)
+                        tool_result = {
+                            "ok": False,
+                            "error": "Инструмент не доступен, давай ответ без его использования",
+                            "tool": name,
+                        }
+
                 print(name, args)
-                logger.info("Использован Function Calling: %s (%s)" % (name, args))
+
                 wrapped_content = {
                     "tool_name": name,
                     "tool_args": args,
