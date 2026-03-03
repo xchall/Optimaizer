@@ -264,6 +264,34 @@ def db_insert_prompt(cursor, system_prompt: str) -> int:
     )
     return int(cursor.lastrowid)
 
+def db_delete_all_context_by_deal_id(cursor, deal_id: int) -> int:
+    """
+    Удалить все строки из `context` по deal_id.
+    Возвращает количество удалённых строк.
+    """
+    cursor.execute(
+        """
+        DELETE FROM `context`
+        WHERE deal_id = %s
+        """,
+        (deal_id,),
+    )
+    return cursor.rowcount
+
+def db_delete_all_results_by_deal_id(cursor, deal_id: int) -> int:
+    """
+    Удалить все строки из `results` по deal_id.
+    Возвращает количество удалённых строк.
+    """
+    cursor.execute(
+        """
+        DELETE FROM `results`
+        WHERE deal_id = %s
+        """,
+        (deal_id,),
+    )
+    return cursor.rowcount
+
 def db_get_processed_ok(cursor, note_id: int) -> int | None:
     cursor.execute("SELECT processed_ok FROM `context` WHERE id = %s LIMIT 1", (note_id,))
     row = cursor.fetchone()
@@ -372,7 +400,6 @@ async def get_llm_answer(
 
 
 EXTERNAL_BASE = "http://217.199.253.86:8000/api/leads/all_data"
-
 
 @app.get("/generate_tasks_scores/{deal_id}")
 async def generate_tasks_scores(
@@ -627,6 +654,68 @@ async def create_prompt(body: PromptIn, api_key: str = Depends(check_api_key)):
                 conn.close()
         except Exception:
             pass
+
+@app.delete("/delete_context/{deal_id}")
+async def delete_context(
+        deal_id: int,
+        api_key: str = Depends(check_api_key)
+):
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        count_deleted = db_delete_all_context_by_deal_id(cursor, deal_id)
+        conn.commit()
+        return {"status": "ok", "count_deleted": count_deleted }
+
+    except Error:
+        logger.exception(f"/delete_context/{deal_id}")
+        raise HTTPException(status_code=500, detail="DB error")
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
+
+
+@app.delete("/delete_results/{deal_id}")
+async def delete_result(
+        deal_id: int,
+        api_key: str = Depends(check_api_key)
+):
+    conn = None
+    cursor = None
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
+        cursor = conn.cursor()
+
+        count_deleted = db_delete_all_results_by_deal_id(cursor, deal_id)
+        conn.commit()
+        return {"status": "ok", "count_deleted": count_deleted}
+
+    except Error:
+        logger.exception(f"/delete_results/{deal_id}")
+        raise HTTPException(status_code=500, detail="DB error")
+    finally:
+        try:
+            if cursor is not None:
+                cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None and conn.is_connected():
+                conn.close()
+        except Exception:
+            pass
+
 
 @app.get("/health")
 async def health_check():
