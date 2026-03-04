@@ -500,7 +500,7 @@ async def generate_tasks_scores(
             db_insert_context(
                 cursor=cursor,
                 note_id=note_id,
-                deal_id=deal_id,
+                deal_id=common_deal_id,
                 created_at=created_at,
                 updated_at=updated_at,
                 note_type=note_type,
@@ -514,6 +514,7 @@ async def generate_tasks_scores(
         if previous_last_note_time == 0:# не было предыдущего контекста, и соответственно предыдущего результатат llm
             res = db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
             if not res:
+                logger.info(f"/generate_tasks_scores No any context for {common_deal_id}")
                 return {
                     "status": "ok",
                     "used_context": "Отсутствует",
@@ -530,10 +531,10 @@ async def generate_tasks_scores(
             new_context = db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
             if not new_context:
                 # Если уже есть старый ответ LLM вернем именно его, иначе сгенерируем новый
-                result = db_select_last_result_by_deal_id(cursor, deal_id)
+                result = db_select_last_result_by_deal_id(cursor, common_deal_id)
                 # если записей нет
                 if result is None:
-                    res = db_select_context_gt(cursor, deal_id,
+                    res = db_select_context_gt(cursor, common_deal_id,
                                                0)
                     deal_context = notes_to_string(res)
 
@@ -542,6 +543,7 @@ async def generate_tasks_scores(
                     llm_answer = run_with_tools_polza(deal_context)
                 else:
                     found_deal_id, created_at, llm_answer = result
+                    logger.info(f"/generate_tasks_scores Took old LLM answer for {common_deal_id}")
                     return {
                         "status": "ok",
                         "used_context": previous_context_str,
@@ -568,7 +570,7 @@ async def generate_tasks_scores(
         # нужно записать ответ в таблицу results
         db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
         conn.commit()
-
+        logger.info(f"/generate_tasks_scores successfully for {common_deal_id}")
         return {
             "status": "ok",
             "used_context": deal_context,
