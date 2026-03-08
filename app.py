@@ -11,6 +11,7 @@ import os
 import uvicorn
 import requests
 import httpx
+import signal
 
 from datetime import datetime
 from  polza_ai_module import run_with_tools_polza
@@ -717,6 +718,22 @@ async def delete_result(
                 conn.close()
         except Exception:
             pass
+
+@app.post("/crash_test_exception")
+async def crash_test_exception(
+    api_key: str = Depends(check_api_key)
+):
+    logger.error("Manual crash test exception endpoint called")
+    raise RuntimeError("Manual crash test")
+
+
+@app.post("/crash_test")
+async def crash_test(
+    api_key: str = Depends(check_api_key)
+):
+    logger.error("Manual crash test endpoint called")
+    os.kill(os.getpid(), signal.SIGKILL)
+
 
 
 @app.get("/health")
