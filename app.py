@@ -511,6 +511,9 @@ async def generate_tasks_scores(
             # Если дошли сюда — всё ок, фиксируем каждый отдельный note
             conn.commit()
 
+        llm_exc = None
+        llm_tb = None
+        deal_context = ""
 
         if previous_last_note_time == 0:# не было предыдущего контекста, и соответственно предыдущего результатат llm
             res = db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
@@ -524,7 +527,12 @@ async def generate_tasks_scores(
 
             deal_context = notes_to_string(res)
             #не ищем предыдущий ответ, его не было
-            llm_answer = run_with_tools_polza(deal_context)
+            try:
+                llm_answer = run_with_tools_polza(deal_context)
+            except Exception as e:
+                llm_answer = ""
+                llm_exc = e
+                llm_tb = e.__traceback__
 
         else:
             previous_context = db_select_context_lt(cursor, common_deal_id, previous_last_note_time+1)
@@ -540,16 +548,33 @@ async def generate_tasks_scores(
                     deal_context = notes_to_string(res)
 
                     # не ищем предыдущий ответ, его не было
-
-                    llm_answer = run_with_tools_polza(deal_context)
+                    try:
+                        llm_answer = run_with_tools_polza(deal_context)
+                    except Exception as e:
+                        llm_answer = ""
+                        llm_exc = e
+                        llm_tb = e.__traceback__
                 else:
                     found_deal_id, created_at, llm_answer = result
-                    logger.info(f"/generate_tasks_scores Took old LLM answer for {common_deal_id}")
-                    return {
-                        "status": "ok",
-                        "used_context": previous_context_str,
-                        "response": llm_answer,
-                    }
+                    if not llm_answer:
+                        res = db_select_context_gt(cursor, common_deal_id,
+                                                   0)
+                        deal_context = notes_to_string(res)
+
+                        # не ищем предыдущий ответ, его не было
+                        try:
+                            llm_answer = run_with_tools_polza(deal_context)
+                        except Exception as e:
+                            llm_answer = ""
+                            llm_exc = e
+                            llm_tb = e.__traceback__
+                    else:
+                        logger.info(f"/generate_tasks_scores Took old LLM answer for {common_deal_id}")
+                        return {
+                            "status": "ok",
+                            "used_context": previous_context_str,
+                            "response": llm_answer,
+                        }
             else:
                 # Создаем единый конетекст
 
@@ -563,14 +588,28 @@ async def generate_tasks_scores(
                 if previous_result is None:
                     deal_context = deal_context_without_previous_result
                 else:
-                    deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
+                    if not previous_result[2]:
+                        deal_context = deal_context_without_previous_result
+                    else:
+                        deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
                                                                            f"основан только на старом контексте, без последних заметок {previous_result[2]}")
-                llm_answer = run_with_tools_polza(deal_context)
+                try:
+                    llm_answer = run_with_tools_polza(deal_context)
+                except Exception as e:
+                    llm_answer = ""
+                    llm_exc = e
+                    llm_tb = e.__traceback__
 
         last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id)
         # нужно записать ответ в таблицу results
         db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
         conn.commit()
+        #Добавим в базу даже не удавшуюся генерацию с llm_answer =="", и после только поднимем ошибку если llm_answer==""
+        if llm_answer == "":
+            if llm_exc is not None:
+                raise llm_exc.with_traceback(llm_tb)
+            raise RuntimeError("LLM returned empty answer without exception")
+
         logger.info(f"/generate_tasks_scores successfully for {common_deal_id}")
         return {
             "status": "ok",
