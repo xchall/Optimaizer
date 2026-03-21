@@ -294,6 +294,40 @@ def db_delete_all_results_by_deal_id(cursor, deal_id: int) -> int:
     )
     return cursor.rowcount
 
+def db_acquire_deal_lock(cursor, deal_id: int) -> bool:
+    """
+    Пытается захватить блокировку для указанного deal_id сделки
+    Возвращает:
+        True  — если блокировка успешно установлена,
+        False — если запись уже существует (блокировка занята).
+    """
+
+    cursor.execute(
+        """
+        INSERT INTO deal_processing_locks (deal_id, locked_at)
+        VALUES (%s, NOW())
+        ON DUPLICATE KEY UPDATE locked_at = locked_at
+        """,
+        (deal_id,),
+    )
+    # rowcount == 1 - вставка;
+    # rowcount == 2 - duplicate
+    return cursor.rowcount == 1
+
+def db_release_deal_lock(cursor, deal_id: int) -> int:
+    """
+    Освобождает блокировку по deal_id.
+
+    """
+    cursor.execute(
+        """
+        DELETE FROM deal_processing_locks
+        WHERE deal_id = %s
+        """,
+        (deal_id,),
+    )
+    return cursor.rowcount
+
 def db_get_processed_ok(cursor, note_id: int) -> int | None:
     cursor.execute("SELECT processed_ok FROM `context` WHERE id = %s LIMIT 1", (note_id,))
     row = cursor.fetchone()
@@ -414,11 +448,17 @@ async def generate_tasks_scores(
 ):
     conn = None
     cursor = None
-    if db_acquire_deal_lock(cursor, deal_id):
 
     try:
         conn = mysql.connector.connect(**DB_CONFIG)
-    try:
+        conn.autocommit = False  # выключили автокоvмит
+        cursor = conn.cursor()
+
+        if not db_acquire_deal_lock(cursor, deal_id):
+            return {
+                "deal_id": deal_id,
+                "locked": True,
+            }
 
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(f"{EXTERNAL_BASE}/{deal_id}")
@@ -431,9 +471,7 @@ async def generate_tasks_scores(
 
         notes_to_process = flatten_notes(payload)
 
-        conn = mysql.connector.connect(**DB_CONFIG)
-        conn.autocommit = False  # выключили автокоvмит
-        cursor = conn.cursor()
+
 
         previous_last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id) # до вставки и обновления данных узнаем, какой был
 
@@ -631,12 +669,23 @@ async def generate_tasks_scores(
         logger.exception("/generate_tasks_scores упал")  # traceback в лог
         raise HTTPException(status_code=400, detail=str(e))
 
+
     finally:
+        # Освобождаем лок
+        try:
+            if cursor is not None:
+                db_release_deal_lock(cursor, deal_id) #высвобождаем сделку от обработки
+        except Exception:
+            pass
+
+        # Закрываем курсор
         try:
             if cursor is not None:
                 cursor.close()
         except Exception:
             pass
+
+        # Закрываем соединение
         try:
             if conn is not None and conn.is_connected():
                 conn.close()
