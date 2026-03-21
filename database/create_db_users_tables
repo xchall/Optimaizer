@@ -1,0 +1,71 @@
+CREATE USER 'remote_user'@'%' IDENTIFIED BY 'djd*ebrRWM$bdh&nd*6';
+CREATE USER 'optimizer_unit'@'%' IDENTIFIED BY 'KS##Mdj46bYD##Bur5Sh';
+
+CREATE DATABASE optimizer_data
+CHARACTER SET utf8mb4
+COLLATE utf8mb4_unicode_ci;
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+ON optimizer_data.* TO 'optimizer_unit'@'%';
+
+
+GRANT ALL PRIVILEGES ON *.* TO 'remote_user'@'%' WITH GRANT OPTION;
+
+FLUSH PRIVILEGES;
+
+
+USE optimizer_data;
+
+CREATE TABLE `context` (
+  `id` BIGINT UNSIGNED NOT NULL,              -- CRM note id
+  `deal_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` BIGINT UNSIGNED NOT NULL,
+  `updated_at` BIGINT UNSIGNED NOT NULL,
+  `note_type` VARCHAR(30) NOT NULL,
+  `payload` LONGTEXT NULL,
+
+  `processed_ok` TINYINT(1) NOT NULL DEFAULT 1,   -- новый флаг 0/1
+
+  PRIMARY KEY (`id`),
+  KEY `idx_context_deal_id` (`deal_id`),
+  KEY `idx_context_deal_time` (`deal_id`, `created_at`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+
+CREATE TABLE `results` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `deal_id` BIGINT UNSIGNED NOT NULL,
+  `created_at` BIGINT UNSIGNED NOT NULL,
+  `updated_at` BIGINT UNSIGNED NOT NULL,
+  `type` VARCHAR(30) NOT NULL,
+  `llm_result` LONGTEXT NULL,
+
+  PRIMARY KEY (`id`),
+  KEY `idx_results_deal_id` (`deal_id`),
+  KEY `idx_results_deal_time` (`deal_id`, `created_at`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+
+USE optimizer_data;
+
+CREATE TABLE `prompt` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `system_prompt` LONGTEXT NULL,
+
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `deal_processing_locks` (
+  `deal_id` BIGINT UNSIGNED NOT NULL,
+  `locked_at` TIMESTAMP,
+
+  PRIMARY KEY (`deal_id`)
+) ENGINE=InnoDB
+  DEFAULT CHARSET=utf8mb4
+  COLLATE=utf8mb4_unicode_ci;
