@@ -675,6 +675,8 @@ async def generate_tasks_scores(
         try:
             if cursor is not None:
                 db_release_deal_lock(cursor, deal_id) #высвобождаем сделку от обработки
+            if conn is not None and conn.is_connected():
+                conn.commit()
         except Exception:
             pass
 
@@ -688,6 +690,7 @@ async def generate_tasks_scores(
         # Закрываем соединение
         try:
             if conn is not None and conn.is_connected():
+                conn.commit()
                 conn.close()
         except Exception:
             pass
