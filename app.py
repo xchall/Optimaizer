@@ -12,6 +12,7 @@ import uvicorn
 import requests
 import httpx
 import signal
+import re
 
 from datetime import datetime
 from  polza_ai_module import run_with_tools_polza
@@ -324,6 +325,10 @@ def flatten_notes(payload: LeadNotesPayload) -> List[Note]:
     all_notes.sort(key=lambda n: n.created_at)
     return all_notes
 
+def check_ai_generated(text):
+    pattern = r'^AI Generated Answer'
+    return bool(re.match(pattern, text))
+
 # -------------------- Роуты --------------------
 
 @app.get("/get_last_time_by_deal_id/{deal_id}")
@@ -409,7 +414,10 @@ async def generate_tasks_scores(
 ):
     conn = None
     cursor = None
+    if db_acquire_deal_lock(cursor, deal_id):
 
+    try:
+        conn = mysql.connector.connect(**DB_CONFIG)
     try:
 
         async with httpx.AsyncClient(timeout=30) as client:
@@ -490,6 +498,8 @@ async def generate_tasks_scores(
                     logger.error("common note without text")
                     text = "содержимое заметки отсутствует"
                     processed_ok = 0
+                if check_ai_generated(text): # пропускаем предыдущие ответы Оптимайзера сохраненные внутри CRM в сделке как note с типом common
+                    continue
                 payload_text = text
             else:
                 continue # просто игнорируем attachments и другие
@@ -522,7 +532,7 @@ async def generate_tasks_scores(
                 return {
                     "status": "ok",
                     "used_context": "Отсутствует",
-                    "response": "Нет контекста -> нет расчета скоров и постановки задач"
+                    "response": "AI Generated Answer\n" + "Нет контекста -> нет расчета скоров и постановки задач"
                 }
 
             deal_context = notes_to_string(res)
@@ -573,7 +583,7 @@ async def generate_tasks_scores(
                         return {
                             "status": "ok",
                             "used_context": previous_context_str,
-                            "response": llm_answer,
+                            "response": "AI Generated Answer\n" + llm_answer
                         }
             else:
                 # Создаем единый конетекст
@@ -614,7 +624,7 @@ async def generate_tasks_scores(
         return {
             "status": "ok",
             "used_context": deal_context,
-            "response": llm_answer
+            "response": "AI Generated Answer\n" + llm_answer
         }
 
     except Exception as e:
