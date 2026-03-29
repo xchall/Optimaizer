@@ -1,3 +1,5 @@
+from http.client import responses
+
 from fastapi import FastAPI, HTTPException, Response, Depends, Request, status, Body
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
@@ -66,6 +68,8 @@ class LeadNotesPayload(BaseModel):
 # Настройка логирования ----------------------
 from logging_setup import logger
 #------------------------------------------------
+
+EXTERNAL_BASE = os.getenv("EXTERNAL_BASE")
 
 API_KEY = os.getenv("OPTIMIZER_API_KEY")
 
@@ -363,6 +367,16 @@ def check_ai_generated(text):
     pattern = r'^AI Generated Answer'
     return bool(re.match(pattern, text))
 
+async def send_post(lead_id: int, note: str):
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            f"{EXTERNAL_BASE}/{lead_id}",
+            json={
+                "note": note,
+            }
+        )
+        return response
+
 # -------------------- Роуты --------------------
 
 @app.get("/get_last_time_by_deal_id/{deal_id}")
@@ -439,7 +453,7 @@ async def get_llm_answer(
             pass
 
 
-EXTERNAL_BASE = "http://217.199.253.86:8000/api/leads/all_data"
+
 
 @app.get("/generate_tasks_scores/{deal_id}")
 async def generate_tasks_scores(
@@ -461,7 +475,7 @@ async def generate_tasks_scores(
             }
 
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(f"{EXTERNAL_BASE}/{deal_id}")
+            r = await client.get(f"{EXTERNAL_BASE}/all_data/{deal_id}")
             if r.status_code != 200:
                 raise HTTPException(status_code=502, detail=f"Upstream error: {r.status_code}")
         payload = LeadNotesPayload.model_validate(r.json())
@@ -567,11 +581,20 @@ async def generate_tasks_scores(
             res = db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
             if not res:
                 logger.info(f"/generate_tasks_scores No any context for {common_deal_id}")
-                return {
-                    "status": "ok",
-                    "used_context": "Отсутствует",
-                    "response": "AI Generated Answer\n" + "Нет контекста -> нет расчета скоров и постановки задач"
-                }
+
+                response = await send_post(common_deal_id, "AI Generated Answer\n" + "Нет контекста -> нет расчета скоров и постановки задач")
+                if response.status_code != 200:
+                    logger.error(f"Post failed with status code {response.status_code}")
+                else:
+                    logger.info(f"Post succeeded for {common_deal_id}")
+
+                return {"status": "ok"}
+
+                # return {
+                #     "status": "ok",
+                #     "used_context": "Отсутствует",
+                #     "response": "AI Generated Answer\n" + "Нет контекста -> нет расчета скоров и постановки задач"
+                # }
 
             deal_context = notes_to_string(res)
             #не ищем предыдущий ответ, его не было
@@ -618,11 +641,19 @@ async def generate_tasks_scores(
                             llm_tb = e.__traceback__
                     else:
                         logger.info(f"/generate_tasks_scores Took old LLM answer for {common_deal_id}")
-                        return {
-                            "status": "ok",
-                            "used_context": previous_context_str,
-                            "response": "AI Generated Answer\n" + llm_answer
-                        }
+
+                        response = await send_post(common_deal_id, "AI Generated Answer\n" + llm_answer)
+                        if response.status_code != 200:
+                            logger.error(f"Post failed with status code {response.status_code}")
+                        else:
+                            logger.info(f"Post succeeded for {common_deal_id}")
+
+                        return {"status": "ok"}
+                        # return {
+                        #     "status": "ok",
+                        #     "used_context": previous_context_str,
+                        #     "response": "AI Generated Answer\n" + llm_answer
+                        # }
             else:
                 # Создаем единый конетекст
 
@@ -659,11 +690,19 @@ async def generate_tasks_scores(
             raise RuntimeError("LLM returned empty answer without exception")
 
         logger.info(f"/generate_tasks_scores successfully for {common_deal_id}")
-        return {
-            "status": "ok",
-            "used_context": deal_context,
-            "response": "AI Generated Answer\n" + llm_answer
-        }
+
+        response = await send_post(common_deal_id, "AI Generated Answer\n" + llm_answer)
+        if response.status_code != 200:
+            logger.error(f"Post failed with status code {response.status_code}")
+        else:
+            logger.info(f"Post succeeded for {common_deal_id}")
+
+        return {"status": "ok"}
+        # return {
+        #     "status": "ok",
+        #     "used_context": deal_context,
+        #     "response": "AI Generated Answer\n" + llm_answer
+        # }
 
     except Exception as e:
         logger.exception("/generate_tasks_scores упал")  # traceback в лог
@@ -690,7 +729,6 @@ async def generate_tasks_scores(
         # Закрываем соединение
         try:
             if conn is not None and conn.is_connected():
-                conn.commit()
                 conn.close()
         except Exception:
             pass
