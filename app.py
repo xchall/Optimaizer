@@ -11,7 +11,6 @@ import dotenv
 from dotenv import load_dotenv
 import os
 import uvicorn
-import requests
 import httpx
 import signal
 import re
@@ -115,7 +114,7 @@ def segments_to_text(segments: list[dict]) -> str:
         if s.get("text")
     )
 
-def transcribe(external_audio_path: str) -> Optional[str]:
+async def transcribe(external_audio_path: str) -> Optional[str]:
     data = {
         "url": external_audio_path,
         "response_format": "json",
@@ -126,8 +125,13 @@ def transcribe(external_audio_path: str) -> Optional[str]:
     }
 
     try:
-        response = requests.post(nexara_url, headers=nexara_headers, data=data, timeout=90)
-        response.raise_for_status()  # выбросит ошибку, если статус не 2xx
+        async with httpx.AsyncClient(timeout=90) as client:
+            response = await client.post(
+                nexara_url,
+                headers=nexara_headers,
+                data=data
+            )
+            response.raise_for_status() # выбросит ошибку, если статус не 2xx
 
         result = response.json()
         text = result.get("text")
@@ -139,13 +143,13 @@ def transcribe(external_audio_path: str) -> Optional[str]:
         if not segments:
             logger.warning("⚠Nexara вернула ответ без поля 'segments': %s", result)
             return text
-
         return segments_to_text(segments)
-    except requests.exceptions.Timeout: # если ждем ответ дольше 90 секунд
+
+    except httpx.TimeoutException:
         logger.error("Ошибка: Nexara не ответила вовремя (timeout)")
         return None
 
-    except requests.exceptions.RequestException as e:
+    except httpx.HTTPError as e:
         logger.error("Ошибка HTTP при обращении к Nexara: %s", e)
         return None
 
