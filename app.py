@@ -2,11 +2,13 @@ from http.client import responses
 
 from fastapi import FastAPI, HTTPException, Response, Depends, Request, status, Body
 from fastapi.security import APIKeyHeader
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from typing import Optional, Any, Dict, List
 from itsdangerous import URLSafeSerializer, BadSignature
-import mysql.connector
-from mysql.connector import Error
+
+import asyncmy
+
 import dotenv
 from dotenv import load_dotenv
 import os
@@ -162,22 +164,21 @@ async def transcribe(external_audio_path: str) -> Optional[str]:
         return None
 
 
-def db_get_last_time_by_deal_id(cursor, deal_id: int) -> int:
-    cursor.execute(
+async def db_get_last_time_by_deal_id(cursor, deal_id: int) -> int:
+    await cursor.execute(
         "SELECT COALESCE(MAX(created_at), 0) AS last_time "
         "FROM `context` WHERE deal_id = %s",
         (deal_id,)
     )
-    (last_time,) = cursor.fetchone()
+    (last_time,) = await cursor.fetchone()
     return int(last_time)
 
 
-
 #Сохранение note
-def db_insert_context(cursor, note_id: int, deal_id: int, created_at: int, updated_at: int, note_type: str, payload: str | None,
+async def db_insert_context(cursor, note_id: int, deal_id: int, created_at: int, updated_at: int, note_type: str, payload: str | None,
                       processed_ok: int,  # 1 = ok, 0 = fail
                       ):
-    cursor.execute(
+    await cursor.execute(
         """
         INSERT INTO `context` (id, deal_id, created_at, updated_at, note_type, payload, processed_ok)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
@@ -188,12 +189,12 @@ def db_insert_context(cursor, note_id: int, deal_id: int, created_at: int, updat
         (note_id, deal_id, created_at, updated_at, note_type, payload, processed_ok),
     )
 
-def db_select_context_lt(cursor, deal_id: int, created_at_limit: int) -> list[tuple[Any, ...]]:
+async def db_select_context_lt(cursor, deal_id: int, created_at_limit: int) -> list[tuple[Any, ...]]:
     """
     Вернуть все записи из context по deal_id, у которых created_at < created_at_limit.
     Работает внутри текущей транзакции (использует переданный cursor).
     """
-    cursor.execute(
+    await cursor.execute(
         """
         SELECT id, deal_id, created_at, updated_at, note_type, payload
         FROM `context`
@@ -202,15 +203,15 @@ def db_select_context_lt(cursor, deal_id: int, created_at_limit: int) -> list[tu
         """,
         (deal_id, created_at_limit),
     )
-    return cursor.fetchall()
+    return await cursor.fetchall()
 
 
-def db_select_context_gt(cursor, deal_id: int, created_at_limit: int) -> list[tuple[Any, ...]]:
+async def db_select_context_gt(cursor, deal_id: int, created_at_limit: int) -> list[tuple[Any, ...]]:
     """
     Вернуть все записи из context по deal_id, у которых created_at > created_at_limit.
     Работает внутри текущей транзакции (использует переданный cursor).
     """
-    cursor.execute(
+    await cursor.execute(
         """
         SELECT id, deal_id, created_at, updated_at, note_type, payload
         FROM `context`
@@ -219,10 +220,10 @@ def db_select_context_gt(cursor, deal_id: int, created_at_limit: int) -> list[tu
         """,
         (deal_id, created_at_limit),
     )
-    return cursor.fetchall()
+    return await cursor.fetchall()
 
-def db_insert_result(cursor, deal_id: int, created_at: int, updated_at: int, type: str, llm_result: Optional[str], ) -> None:
-    cursor.execute(
+async def db_insert_result(cursor, deal_id: int, created_at: int, updated_at: int, type: str, llm_result: Optional[str], ) -> None:
+    await cursor.execute(
         """
         INSERT INTO `results` (deal_id, created_at, updated_at, type, llm_result)
         VALUES (%s, %s, %s, %s, %s)
@@ -231,11 +232,11 @@ def db_insert_result(cursor, deal_id: int, created_at: int, updated_at: int, typ
     )
 
 
-def db_select_last_result_by_deal_id(cursor, deal_id: int) -> Optional[tuple[int, int, Optional[str]]]:
+async def db_select_last_result_by_deal_id(cursor, deal_id: int) -> Optional[tuple[int, int, Optional[str]]]:
     """
     Найти самый последний результат по deal_id (с максимальным created_at).
     """
-    cursor.execute(
+    await cursor.execute(
         """
         SELECT deal_id, created_at, llm_result
         FROM `results`
@@ -245,13 +246,13 @@ def db_select_last_result_by_deal_id(cursor, deal_id: int) -> Optional[tuple[int
         """,
         (deal_id,),
     )
-    return cursor.fetchone()
+    return await cursor.fetchone()
 
-def db_select_last_prompt(cursor) -> Optional[tuple[int, Optional[str]]]:
+async def db_select_last_prompt(cursor) -> Optional[tuple[int, Optional[str]]]:
     """
     Возвращает последнюю добавленную запись из prompt: (id, system_prompt) или None.
     """
-    cursor.execute(
+    await cursor.execute(
         """
         SELECT id, system_prompt
         FROM `prompt`
@@ -259,13 +260,13 @@ def db_select_last_prompt(cursor) -> Optional[tuple[int, Optional[str]]]:
         LIMIT 1
         """
     )
-    return cursor.fetchone()
+    return await cursor.fetchone()
 
-def db_insert_prompt(cursor, system_prompt: str) -> int:
+async def db_insert_prompt(cursor, system_prompt: str) -> int:
     """
     Вставляет system_prompt в prompt и возвращает id новой записи.
     """
-    cursor.execute(
+    await cursor.execute(
         """
         INSERT INTO `prompt` (system_prompt)
         VALUES (%s)
@@ -274,12 +275,12 @@ def db_insert_prompt(cursor, system_prompt: str) -> int:
     )
     return int(cursor.lastrowid)
 
-def db_delete_all_context_by_deal_id(cursor, deal_id: int) -> int:
+async def db_delete_all_context_by_deal_id(cursor, deal_id: int) -> int:
     """
     Удалить все строки из `context` по deal_id.
     Возвращает количество удалённых строк.
     """
-    cursor.execute(
+    await cursor.execute(
         """
         DELETE FROM `context`
         WHERE deal_id = %s
@@ -288,12 +289,12 @@ def db_delete_all_context_by_deal_id(cursor, deal_id: int) -> int:
     )
     return cursor.rowcount
 
-def db_delete_all_results_by_deal_id(cursor, deal_id: int) -> int:
+async def db_delete_all_results_by_deal_id(cursor, deal_id: int) -> int:
     """
     Удалить все строки из `results` по deal_id.
     Возвращает количество удалённых строк.
     """
-    cursor.execute(
+    await cursor.execute(
         """
         DELETE FROM `results`
         WHERE deal_id = %s
@@ -302,7 +303,7 @@ def db_delete_all_results_by_deal_id(cursor, deal_id: int) -> int:
     )
     return cursor.rowcount
 
-def db_acquire_deal_lock(cursor, deal_id: int) -> bool:
+async def db_acquire_deal_lock(cursor, deal_id: int) -> bool:
     """
     Пытается захватить блокировку для указанного deal_id сделки
     Возвращает:
@@ -310,7 +311,7 @@ def db_acquire_deal_lock(cursor, deal_id: int) -> bool:
         False — если запись уже существует (блокировка занята).
     """
 
-    cursor.execute(
+    await cursor.execute(
         """
         INSERT INTO deal_processing_locks (deal_id, locked_at)
         VALUES (%s, NOW())
@@ -322,12 +323,12 @@ def db_acquire_deal_lock(cursor, deal_id: int) -> bool:
     # rowcount == 2 - duplicate
     return cursor.rowcount == 1
 
-def db_release_deal_lock(cursor, deal_id: int) -> int:
+async def db_release_deal_lock(cursor, deal_id: int) -> int:
     """
     Освобождает блокировку по deal_id.
 
     """
-    cursor.execute(
+    await cursor.execute(
         """
         DELETE FROM deal_processing_locks
         WHERE deal_id = %s
@@ -336,9 +337,9 @@ def db_release_deal_lock(cursor, deal_id: int) -> int:
     )
     return cursor.rowcount
 
-def db_get_processed_ok(cursor, note_id: int) -> int | None:
-    cursor.execute("SELECT processed_ok FROM `context` WHERE id = %s LIMIT 1", (note_id,))
-    row = cursor.fetchone()
+async def db_get_processed_ok(cursor, note_id: int) -> int | None:
+    await cursor.execute("SELECT processed_ok FROM `context` WHERE id = %s LIMIT 1", (note_id,))
+    row = await cursor.fetchone()
     return row[0] if row else None
 
 def notes_to_string(notes: list[tuple[Any, ...]]) -> str:
@@ -391,16 +392,28 @@ async def get_last_time_by_deal_id(
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        last_time = db_get_last_time_by_deal_id(cursor, deal_id)
-    except Error as e:
+        last_time = await db_get_last_time_by_deal_id(cursor, deal_id)
+        # если нет записей — вернется 0
+        return {"deal_id": deal_id, "last_time": last_time}
+
+    except Exception as e:
         logger.error("/get_last_time_by_deal_id/{deal_id} Ошибка базы данных %s", e)
         raise HTTPException(status_code=500, detail="DB error")
 
-    # если нет записей — вернется 0
-    return {"deal_id": deal_id, "last_time": last_time}
+    finally:
+        try:
+            if cursor is not None:
+                await cursor.close()
+        except Exception:
+            pass
+        try:
+            if conn is not None:
+                conn.close()
+        except Exception:
+            pass
 
 @app.get("/llm_answer/{deal_id}")
 async def get_llm_answer(
@@ -410,23 +423,23 @@ async def get_llm_answer(
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        result = db_select_last_result_by_deal_id(cursor, deal_id)
+        result = await db_select_last_result_by_deal_id(cursor, deal_id)
 
         # если записей нет
         if result is None:
-            res = db_select_context_gt(cursor, deal_id,
+            res = await db_select_context_gt(cursor, deal_id,
                                        0)
             deal_context = notes_to_string(res)
 
             # не ищем предыдущий ответ, его не было
 
-            llm_answer = run_with_tools_polza(deal_context)
-            last_note_time = db_get_last_time_by_deal_id(cursor, deal_id)
-            db_insert_result(cursor, deal_id, last_note_time, last_note_time, "common", llm_answer)
-            conn.commit()
+            llm_answer = await run_in_threadpool(run_with_tools_polza, deal_context)
+            last_note_time = await db_get_last_time_by_deal_id(cursor, deal_id)
+            await db_insert_result(cursor, deal_id, last_note_time, last_note_time, "common", llm_answer)
+            await conn.commit()
             return {
                 "deal_id": int(deal_id),
                 "created_at": int(last_note_time),
@@ -440,22 +453,21 @@ async def get_llm_answer(
             "llm_answer": llm_answer,
         }
 
-    except Error:
+    except Exception:
         logger.exception("/llm_answer/{deal_id} упал")
         raise HTTPException(status_code=500, detail="DB error")
 
     finally:
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
-
 
 
 
@@ -466,17 +478,17 @@ async def generate_tasks_scores(
 ):
     conn = None
     cursor = None
+    lock_acquired = False
 
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        conn.autocommit = False  # выключили автокоvмит
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        await conn.autocommit(False) # выключили автокоvмит
+        cursor = await conn.cursor()
 
-        if not db_acquire_deal_lock(cursor, deal_id):
-            return {
-                "deal_id": deal_id,
-                "locked": True,
-            }
+        lock_acquired = await db_acquire_deal_lock(cursor, deal_id)
+        if not lock_acquired:
+            return {"deal_id": deal_id, "locked": True}
+        await conn.commit()
 
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(f"{EXTERNAL_BASE}/all_data/{deal_id}")
@@ -490,14 +502,13 @@ async def generate_tasks_scores(
         notes_to_process = flatten_notes(payload)
 
 
-
-        previous_last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id) # до вставки и обновления данных узнаем, какой был
+        previous_last_note_time = await db_get_last_time_by_deal_id(cursor, common_deal_id) # до вставки и обновления данных узнаем, какой был
 
         for note in notes_to_process:
             processed_ok = 1 # флаг, показывающий успешность обработки заметки
 
             note_id = note.id
-            processed = db_get_processed_ok(cursor, note_id)
+            processed = await db_get_processed_ok(cursor, note_id)
             if processed == 1:
                 continue # пропускаем эту заметку, так как она уже в бд со всей информацией
 
@@ -516,10 +527,10 @@ async def generate_tasks_scores(
                         text = f"не удалось транскрибировать звонок (нет ссылки на звонок) id = {note_id}"
                         processed_ok = 0
                     else:
-                        text = transcribe(link)
+                        text = await transcribe(link)
                         if text is None: # 1 retry для транскрибации
                             logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
-                            text = transcribe(link)
+                            text = await transcribe(link)
                 else:
                     text = "Не дозвонились до клиента."
                 if text is None:
@@ -536,10 +547,10 @@ async def generate_tasks_scores(
                         text = f"не удалось транскрибировать звонок (нет ссылки на звонок) id = {note_id}"
                         processed_ok = 0
                     else:
-                        text = transcribe(link)
+                        text = await transcribe(link)
                         if text is None:
                             logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
-                            text = transcribe(link)
+                            text = await transcribe(link)
                 else:
                     text = "Клиент не дозвонился."
                 if text is None:
@@ -564,7 +575,7 @@ async def generate_tasks_scores(
                 continue
 
             # Сохраняем заметку note в БД
-            db_insert_context(
+            await db_insert_context(
                 cursor=cursor,
                 note_id=note_id,
                 deal_id=common_deal_id,
@@ -575,14 +586,14 @@ async def generate_tasks_scores(
                 processed_ok=processed_ok,
             )
             # Если дошли сюда — всё ок, фиксируем каждый отдельный note
-            conn.commit()
+            await conn.commit()
 
         llm_exc = None
         llm_tb = None
         deal_context = ""
 
         if previous_last_note_time == 0:# не было предыдущего контекста, и соответственно предыдущего результатат llm
-            res = db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
+            res = await db_select_context_gt(cursor,common_deal_id, previous_last_note_time)
             if not res:
                 logger.info(f"/generate_tasks_scores No any context for {common_deal_id}")
 
@@ -603,28 +614,28 @@ async def generate_tasks_scores(
             deal_context = notes_to_string(res)
             #не ищем предыдущий ответ, его не было
             try:
-                llm_answer = run_with_tools_polza(deal_context)
+                llm_answer = await run_in_threadpool(run_with_tools_polza, deal_context)
             except Exception as e:
                 llm_answer = ""
                 llm_exc = e
                 llm_tb = e.__traceback__
 
         else:
-            previous_context = db_select_context_lt(cursor, common_deal_id, previous_last_note_time+1)
+            previous_context = await db_select_context_lt(cursor, common_deal_id, previous_last_note_time+1)
             previous_context_str = notes_to_string(previous_context)
-            new_context = db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
+            new_context = await db_select_context_gt(cursor, common_deal_id, previous_last_note_time)
             if not new_context:
                 # Если уже есть старый ответ LLM вернем именно его, иначе сгенерируем новый
-                result = db_select_last_result_by_deal_id(cursor, common_deal_id)
+                result = await db_select_last_result_by_deal_id(cursor, common_deal_id)
                 # если записей нет
                 if result is None:
-                    res = db_select_context_gt(cursor, common_deal_id,
+                    res = await db_select_context_gt(cursor, common_deal_id,
                                                0)
                     deal_context = notes_to_string(res)
 
                     # не ищем предыдущий ответ, его не было
                     try:
-                        llm_answer = run_with_tools_polza(deal_context)
+                        llm_answer = await run_in_threadpool(run_with_tools_polza, deal_context)
                     except Exception as e:
                         llm_answer = ""
                         llm_exc = e
@@ -632,13 +643,13 @@ async def generate_tasks_scores(
                 else:
                     found_deal_id, created_at, llm_answer = result
                     if not llm_answer:
-                        res = db_select_context_gt(cursor, common_deal_id,
+                        res = await db_select_context_gt(cursor, common_deal_id,
                                                    0)
                         deal_context = notes_to_string(res)
 
                         # не ищем предыдущий ответ, его не было
                         try:
-                            llm_answer = run_with_tools_polza(deal_context)
+                            llm_answer = await run_in_threadpool(run_with_tools_polza, deal_context)
                         except Exception as e:
                             llm_answer = ""
                             llm_exc = e
@@ -667,7 +678,7 @@ async def generate_tasks_scores(
                                +  new_context_str)
 
                 #находим предыдущий ответ модели
-                previous_result = db_select_last_result_by_deal_id(cursor, common_deal_id)
+                previous_result = await db_select_last_result_by_deal_id(cursor, common_deal_id)
                 if previous_result is None:
                     deal_context = deal_context_without_previous_result
                 else:
@@ -677,16 +688,16 @@ async def generate_tasks_scores(
                         deal_context = deal_context_without_previous_result + (f" SYSTEM_INFO: далее идет предыдущий твой ответ, который был"
                                                                            f"основан только на старом контексте, без последних заметок {previous_result[2]}")
                 try:
-                    llm_answer = run_with_tools_polza(deal_context)
+                    llm_answer = await run_in_threadpool(run_with_tools_polza, deal_context)
                 except Exception as e:
                     llm_answer = ""
                     llm_exc = e
                     llm_tb = e.__traceback__
 
-        last_note_time = db_get_last_time_by_deal_id(cursor, common_deal_id)
+        last_note_time = await db_get_last_time_by_deal_id(cursor, common_deal_id)
         # нужно записать ответ в таблицу results
-        db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
-        conn.commit()
+        await db_insert_result(cursor, common_deal_id, last_note_time, last_note_time, "common", llm_answer)
+        await conn.commit()
         #Добавим в базу даже не удавшуюся генерацию с llm_answer =="", и после только поднимем ошибку если llm_answer==""
         if llm_answer == "":
             if llm_exc is not None:
@@ -716,23 +727,23 @@ async def generate_tasks_scores(
     finally:
         # Освобождаем лок
         try:
-            if cursor is not None:
-                db_release_deal_lock(cursor, deal_id) #высвобождаем сделку от обработки
-            if conn is not None and conn.is_connected():
-                conn.commit()
+            if lock_acquired and cursor is not None:
+                await db_release_deal_lock(cursor, deal_id) #высвобождаем сделку от обработки
+                if conn is not None:
+                    await conn.commit()
         except Exception:
             pass
 
         # Закрываем курсор
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
 
         # Закрываем соединение
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
@@ -742,27 +753,27 @@ async def get_latest_prompt(api_key: str = Depends(check_api_key)):
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        row = db_select_last_prompt(cursor)
+        row = await db_select_last_prompt(cursor)
         if row is None:
             return {"id": 0, "system_prompt": ""}
 
         pid, system_prompt = row
         return {"id": int(pid), "system_prompt": system_prompt or ""}
 
-    except Error:
+    except Exception:
         logger.exception("/prompt/latest не сработал")
         raise HTTPException(status_code=500, detail="DB error")
     finally:
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
@@ -773,30 +784,30 @@ async def create_prompt(body: PromptIn, api_key: str = Depends(check_api_key)):
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        new_id = db_insert_prompt(cursor, body.system_prompt)
-        conn.commit()
+        new_id = await db_insert_prompt(cursor, body.system_prompt)
+        await conn.commit()
 
         return {"status": "ok", "id": new_id}
 
-    except Error:
+    except Exception:
         logger.exception("/prompt не сработал")
         try:
             if conn is not None:
-                conn.rollback()
+                await conn.rollback()
         except Exception:
             pass
         raise HTTPException(status_code=500, detail="DB error")
     finally:
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
@@ -809,24 +820,24 @@ async def delete_context(
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        count_deleted = db_delete_all_context_by_deal_id(cursor, deal_id)
-        conn.commit()
+        count_deleted = await db_delete_all_context_by_deal_id(cursor, deal_id)
+        await conn.commit()
         return {"status": "ok", "count_deleted": count_deleted }
 
-    except Error:
+    except Exception:
         logger.exception(f"/delete_context/{deal_id}")
         raise HTTPException(status_code=500, detail="DB error")
     finally:
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
@@ -840,24 +851,24 @@ async def delete_result(
     conn = None
     cursor = None
     try:
-        conn = mysql.connector.connect(**DB_CONFIG)
-        cursor = conn.cursor()
+        conn = await asyncmy.connect(**DB_CONFIG)
+        cursor = await conn.cursor()
 
-        count_deleted = db_delete_all_results_by_deal_id(cursor, deal_id)
-        conn.commit()
+        count_deleted = await db_delete_all_results_by_deal_id(cursor, deal_id)
+        await conn.commit()
         return {"status": "ok", "count_deleted": count_deleted}
 
-    except Error:
+    except Exception:
         logger.exception(f"/delete_results/{deal_id}")
         raise HTTPException(status_code=500, detail="DB error")
     finally:
         try:
             if cursor is not None:
-                cursor.close()
+                await cursor.close()
         except Exception:
             pass
         try:
-            if conn is not None and conn.is_connected():
+            if conn is not None:
                 conn.close()
         except Exception:
             pass
