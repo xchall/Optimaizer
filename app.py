@@ -3,6 +3,7 @@ from http.client import responses
 from fastapi import FastAPI, HTTPException, Response, Depends, Request, status, Body
 from fastapi.security import APIKeyHeader
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 from typing import Optional, Any, Dict, List
 from itsdangerous import URLSafeSerializer, BadSignature
@@ -71,7 +72,7 @@ from logging_setup import logger
 #------------------------------------------------
 
 EXTERNAL_BASE = os.getenv("EXTERNAL_BASE")
-
+IP_ALLOWED = os.getenv("IP_ALLOWED")
 API_KEY = os.getenv("OPTIMIZER_API_KEY")
 
 api_key_header = APIKeyHeader(name="X-API-Key")
@@ -101,7 +102,17 @@ DB_CONFIG = {
 app = FastAPI(
     title="Optimizer2.0 or Shturman API",
     description="Сервис для генерации скорингов и постановки задач по известным notes из сделки",
-    version="1.1.0",
+    version="1.2.0",
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        IP_ALLOWED,
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -393,7 +404,7 @@ async def get_last_time_by_deal_id(
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         last_time = await db_get_last_time_by_deal_id(cursor, deal_id)
         # если нет записей — вернется 0
@@ -424,7 +435,7 @@ async def get_llm_answer(
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         result = await db_select_last_result_by_deal_id(cursor, deal_id)
 
@@ -483,7 +494,7 @@ async def generate_tasks_scores(
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
         await conn.autocommit(False) # выключили автокоvмит
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         lock_acquired = await db_acquire_deal_lock(cursor, deal_id)
         if not lock_acquired:
@@ -754,7 +765,7 @@ async def get_latest_prompt(api_key: str = Depends(check_api_key)):
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         row = await db_select_last_prompt(cursor)
         if row is None:
@@ -785,7 +796,7 @@ async def create_prompt(body: PromptIn, api_key: str = Depends(check_api_key)):
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         new_id = await db_insert_prompt(cursor, body.system_prompt)
         await conn.commit()
@@ -821,7 +832,7 @@ async def delete_context(
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         count_deleted = await db_delete_all_context_by_deal_id(cursor, deal_id)
         await conn.commit()
@@ -852,7 +863,7 @@ async def delete_result(
     cursor = None
     try:
         conn = await asyncmy.connect(**DB_CONFIG)
-        cursor = await conn.cursor()
+        cursor = conn.cursor()
 
         count_deleted = await db_delete_all_results_by_deal_id(cursor, deal_id)
         await conn.commit()
@@ -895,12 +906,12 @@ async def health_check():
     return {"status": "ok"}
 
 
-
-if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=8080,
-        access_log=True, # логируем дерганья ручек и responses в journal (это через sys.stdout или sys.stderr)
-        workers=4
-)
+# указываем в Unit сервиса как запускается 4 воркера uvicorn
+# if __name__ == "__main__":
+#     uvicorn.run(
+#         app,
+#         host="0.0.0.0",
+#         port=8080,
+#         access_log=True, # логируем дерганья ручек и responses в journal (это через sys.stdout или sys.stderr)
+#         workers=4
+# )
