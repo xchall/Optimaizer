@@ -108,7 +108,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        IP_ALLOWED,
+        "*" # разрешим все ip, пока не известно нужное ip
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -130,9 +130,8 @@ def segments_to_text(segments: list[dict]) -> str:
 async def transcribe(external_audio_path: str) -> Optional[str]:
     data = {
         "url": external_audio_path,
-        "response_format": "json",
-        # "task": "transcribe",
         "task": "diarize",
+        "response_format": "verbose_json",
         "num_speakers": 2,
         "diarization_setting": "telephonic"
     }
@@ -383,13 +382,21 @@ def check_ai_generated(text):
     pattern = r'^AI Generated Answer'
     return bool(re.match(pattern, text))
 
+# async def send_post(lead_id: int, note: str):
+#     async with httpx.AsyncClient() as client:
+#         response = await client.post(
+#             f"{EXTERNAL_BASE}/{lead_id}",
+#             json={
+#                 "note": note,
+#             }
+#         )
+#         return response
+
 async def send_post(lead_id: int, note: str):
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{EXTERNAL_BASE}/{lead_id}",
-            json={
-                "note": note,
-            }
+            params={"note": note}
         )
         return response
 
