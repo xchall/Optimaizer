@@ -13,6 +13,7 @@ import asyncmy
 import dotenv
 from dotenv import load_dotenv
 import os
+import tempfile
 import uvicorn
 import httpx
 import signal
@@ -172,6 +173,92 @@ async def transcribe(external_audio_path: str) -> Optional[str]:
     except Exception as e:
         logger.error("Непредвиденная ошибка транскрибации: %s", e)
         return None
+
+async def transcribe_file(external_audio_path: str) -> Optional[str]:
+    temp_path = None
+
+    try:
+        async with httpx.AsyncClient(timeout=90) as client:
+
+            # Создаем временный файл
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp3") as temp_file:
+                temp_path = temp_file.name
+
+            # Скачиваем аудио потоково
+            async with client.stream("GET", external_audio_path) as response:
+                response.raise_for_status()
+
+                with open(temp_path, "wb") as f:
+                    async for chunk in response.aiter_bytes():
+                        f.write(chunk)
+
+            # Готовим запрос в Nexara
+            headers = nexara_headers
+
+            data = {
+                "task": "diarize",
+                "response_format": "verbose_json",
+                "num_speakers": 2,
+                "diarization_setting": "telephonic"
+            }
+
+            # 4. Отправляем файл
+            with open(temp_path, "rb") as f:
+                files = {
+                    "file": ("audio.mp3", f, "audio/mpeg"),
+                }
+
+                response = await client.post(
+                    nexara_url,
+                    headers=headers,
+                    files=files,
+                    data=data
+                )
+
+            response.raise_for_status()
+
+            result = response.json()
+
+            text = result.get("text")
+            segments = result.get("segments")
+
+            if not text:
+                logger.warning("Nexara вернула ответ без поля 'text': %s", result)
+                return None
+
+            if not segments:
+                logger.warning("⚠ Nexara вернула ответ без поля 'segments': %s", result)
+                return text
+
+            return segments_to_text(segments)
+
+    except httpx.TimeoutException:
+        logger.error("Ошибка: Nexara или источник аудио не ответил вовремя (timeout)")
+        return None
+
+    except httpx.HTTPStatusError as e:
+        logger.error("HTTP ошибка: %s | Response: %s", e, e.response.text if e.response else "")
+        return None
+
+    except httpx.HTTPError as e:
+        logger.error("Ошибка сети при обращении: %s", e)
+        return None
+
+    except ValueError:
+        logger.error("Ошибка: Nexara вернула не-JSON ответ")
+        return None
+
+    except Exception as e:
+        logger.error("Непредвиденная ошибка транскрибации: %s", e)
+        return None
+
+    finally:
+        # 🔥 гарантированное удаление файла
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except Exception as e:
+                logger.warning("Не удалось удалить временный файл %s: %s", temp_path, e)
 
 
 async def db_get_last_time_by_deal_id(cursor, deal_id: int) -> int:
@@ -411,7 +498,7 @@ async def send_post(lead_id: int, note: str):
         return None
 
     except Exception as e:
-        logger.error("Непредвиденная ошибка транскрибации: %s", e)
+        logger.error("Непредвиденная ошибка Optimizer Connector: %s", e)
         return None
 
 # -------------------- Роуты --------------------
@@ -562,7 +649,7 @@ async def generate_tasks_scores(
                         text = await transcribe(link)
                         if text is None: # 1 retry для транскрибации
                             logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
-                            text = await transcribe(link)
+                            text = await transcribe_file(link)
                 else:
                     text = "Не дозвонились до клиента."
                 if text is None:
@@ -582,7 +669,7 @@ async def generate_tasks_scores(
                         text = await transcribe(link)
                         if text is None:
                             logger.warning("Transcription failed, retry once. link=%s note_id=%s", link, note_id)
-                            text = await transcribe(link)
+                            text = await transcribe_file(link)
                 else:
                     text = "Клиент не дозвонился."
                 if text is None:
