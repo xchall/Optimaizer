@@ -393,12 +393,26 @@ def check_ai_generated(text):
 #         return response
 
 async def send_post(lead_id: int, note: str):
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            f"{EXTERNAL_BASE}/{lead_id}",
-            params={"note": note}
-        )
-        return response
+
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(
+                f"{EXTERNAL_BASE}/{lead_id}",
+                params={"note": note}
+            )
+            return response
+
+    except httpx.TimeoutException:
+        logger.error("Ошибка: Optimizer Connector не ответил вовремя (timeout)")
+        return None
+
+    except httpx.HTTPError as e:
+        logger.error("Ошибка HTTP при обращении к Optimizer Connector: %s", e)
+        return None
+
+    except Exception as e:
+        logger.error("Непредвиденная ошибка транскрибации: %s", e)
+        return None
 
 # -------------------- Роуты --------------------
 
@@ -616,10 +630,11 @@ async def generate_tasks_scores(
                 logger.info(f"/generate_tasks_scores No any context for {common_deal_id}")
 
                 response = await send_post(common_deal_id, "AI Generated Answer\n" + "Нет контекста -> нет расчета скоров и постановки задач")
-                if response.status_code != 200:
-                    logger.error(f"Post failed with status code {response.status_code}")
-                else:
-                    logger.info(f"Post succeeded for {common_deal_id}")
+                if response is not None:
+                    if response.status_code != 200:
+                        logger.error(f"Post failed with status code {response.status_code}")
+                    else:
+                        logger.info(f"Post succeeded for {common_deal_id}")
 
                 return {"status": "ok"}
 
@@ -676,10 +691,11 @@ async def generate_tasks_scores(
                         logger.info(f"/generate_tasks_scores Took old LLM answer for {common_deal_id}")
 
                         response = await send_post(common_deal_id, "AI Generated Answer\n" + llm_answer)
-                        if response.status_code != 200:
-                            logger.error(f"Post failed with status code {response.status_code}")
-                        else:
-                            logger.info(f"Post succeeded for {common_deal_id}")
+                        if response is not None:
+                            if response.status_code != 200:
+                                logger.error(f"Post failed with status code {response.status_code}")
+                            else:
+                                logger.info(f"Post succeeded for {common_deal_id}")
 
                         return {"status": "ok"}
                         # return {
@@ -725,10 +741,11 @@ async def generate_tasks_scores(
         logger.info(f"/generate_tasks_scores successfully for {common_deal_id}")
 
         response = await send_post(common_deal_id, "AI Generated Answer\n" + llm_answer)
-        if response.status_code != 200:
-            logger.error(f"Post failed with status code {response.status_code}")
-        else:
-            logger.info(f"Post succeeded for {common_deal_id}")
+        if response is not None:
+            if response.status_code != 200:
+                logger.error(f"Post failed with status code {response.status_code}")
+            else:
+                logger.info(f"Post succeeded for {common_deal_id}")
 
         return {"status": "ok"}
         # return {
